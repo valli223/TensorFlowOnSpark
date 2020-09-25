@@ -11,23 +11,23 @@ Note: the tests that use Spark will require a local Spark Standalone cluster (vs
 
 ## Instructions
 
-1\. Setup ENV variables to point to your Spark and TensorFlowOnSpark.
+1. Setup ENV variables to point to your Spark and TensorFlowOnSpark.
+```bash
+export SPARK_HOME=<path_to_Spark>
+export TFoS_HOME=<path_to_TFoS>
+export PYTHONPATH=${SPARK_HOME}/python
+export SPARK_CLASSPATH=${TFoS_HOME}/lib/tensorflow-hadoop-1.0-SNAPSHOT.jar
 ```
-    export SPARK_HOME=<path_to_Spark>
-    export TFoS_HOME=<path_to_TFoS>
-    export PYTHONPATH=${SPARK_HOME}/python
-    export SPARK_CLASSPATH=<path_to_tensorflow-hadoop-*.jar>
-```
-2a. Run script to automatically start Spark Standalone cluster, run all tests, and shutdown the cluster, OR
-```
-cd ${TFoS_HOME}/tests
+2. Run script to automatically start Spark Standalone cluster, run all tests, and shutdown the cluster, OR
+```bash
+cd ${TFoS_HOME}/test
 ./run_tests.sh
 ```
-2b. Manually start/stop the Spark Standalone cluster (when iterating on code).
+3. OPTIONAL: manually start/stop the Spark Standalone cluster (when iterating on code).
 ```
 # Start Spark Standalone cluster
 export MASTER=spark://$(hostname):7077
-export SPARK_WORKER_INSTANCES=3; export CORES_PER_WORKER=1
+export SPARK_WORKER_INSTANCES=2; export CORES_PER_WORKER=1
 export TOTAL_CORES=$((${CORES_PER_WORKER}*${SPARK_WORKER_INSTANCES}))
 ${SPARK_HOME}/sbin/start-master.sh; ${SPARK_HOME}/sbin/start-slave.sh -c ${CORES_PER_WORKER} -m 3G ${MASTER}
 

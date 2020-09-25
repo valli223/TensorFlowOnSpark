@@ -21,7 +21,16 @@ import numpy as np
 import tensorflow as tf
 
 
-def inference(args, ctx):
+def inference(it, num_workers, args):
+  from tensorflowonspark import util
+
+  # consume worker number from RDD partition iterator
+  for i in it:
+    worker_num = i
+  print("worker_num: {}".format(i))
+
+  # setup env for single-node TF
+  util.single_node_env()
 
   # load saved_model
   saved_model = tf.saved_model.load(args.export_dir, tags='serve')
@@ -39,19 +48,19 @@ def inference(args, ctx):
 
   # define a new tf.data.Dataset (for inferencing)
   ds = tf.data.Dataset.list_files("{}/part-*".format(args.images_labels), shuffle=False)
-  ds = ds.shard(ctx.num_workers, ctx.worker_num)
+  ds = ds.shard(num_workers, worker_num)
   ds = ds.interleave(tf.data.TFRecordDataset)
   ds = ds.map(parse_tfr)
   ds = ds.batch(10)
 
   # create an output file per spark worker for the predictions
   tf.io.gfile.makedirs(args.output)
-  output_file = tf.io.gfile.GFile("{}/part-{:05d}".format(args.output, ctx.worker_num), mode='w')
+  output_file = tf.io.gfile.GFile("{}/part-{:05d}".format(args.output, worker_num), mode='w')
 
   for batch in ds:
     predictions = predict(conv2d_input=batch[0])
     labels = np.reshape(batch[1], -1).astype(np.int)
-    preds = np.argmax(predictions['dense_1'], axis=1)
+    preds = np.argmax(predictions['logits'], axis=1)
     for x in zip(labels, preds):
       output_file.write("{} {}\n".format(x[0], x[1]))
 
@@ -61,7 +70,6 @@ def inference(args, ctx):
 if __name__ == '__main__':
   from pyspark.context import SparkContext
   from pyspark.conf import SparkConf
-  from tensorflowonspark import TFParallel
 
   sc = SparkContext(conf=SparkConf().setAppName("mnist_inference"))
   executors = sc._conf.get("spark.executor.instances")
@@ -75,5 +83,7 @@ if __name__ == '__main__':
   args, _ = parser.parse_known_args()
   print("args: {}".format(args))
 
-  # Running single-node TF instances on each executor
-  TFParallel.run(sc, inference, args, args.cluster_size)
+  # Not using TFCluster... just running single-node TF instances on each executor
+  nodes = list(range(args.cluster_size))
+  nodeRDD = sc.parallelize(list(range(args.cluster_size)), args.cluster_size)
+  nodeRDD.foreachPartition(lambda worker_num: inference(worker_num, args.cluster_size, args))

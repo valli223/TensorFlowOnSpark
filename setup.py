@@ -6,16 +6,16 @@ with open('README.md') as f:
 setup(
   name='tensorflowonspark',
   packages=['tensorflowonspark'],
-  version='1.4.3',
+  version='2.2.1',
   description='Deep learning with TensorFlow on Apache Spark clusters',
   long_description=long_description,
   long_description_content_type='text/markdown',
   author='Yahoo, Inc.',
   url='https://github.com/yahoo/TensorFlowOnSpark',
   keywords=['tensorflowonspark', 'tensorflow', 'spark', 'machine learning', 'yahoo'],
+  install_requires=['packaging'],
   license='Apache 2.0',
   classifiers=[
-    'Development Status :: 4 - Beta',
     'Intended Audience :: Developers',
     'Intended Audience :: Science/Research',
     'License :: OSI Approved :: Apache Software License',

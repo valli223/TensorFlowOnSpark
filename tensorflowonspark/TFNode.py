@@ -16,10 +16,14 @@ from __future__ import print_function
 
 import getpass
 import logging
-import os
-import time
+import pkg_resources
+
+from packaging import version
 from six.moves.queue import Empty
-from . import marker
+from . import compat, marker
+
+logger = logging.getLogger(__name__)
+TF_VERSION = pkg_resources.get_distribution('tensorflow').version
 
 
 def hdfs_path(ctx, path):
@@ -56,7 +60,7 @@ def hdfs_path(ctx, path):
     elif ctx.defaultFS.startswith("file://"):
       return "{0}/{1}/{2}".format(ctx.defaultFS, ctx.working_dir[1:], path)
     else:
-      logging.warn("Unknown scheme {0} with relative path: {1}".format(ctx.defaultFS, path))
+      logger.warn("Unknown scheme {0} with relative path: {1}".format(ctx.defaultFS, path))
       return "{0}/{1}".format(ctx.defaultFS, path)
 
 
@@ -66,6 +70,8 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
   This is intended to be invoked from within the TF ``map_fun``, replacing explicit code to instantiate ``tf.train.ClusterSpec``
   and ``tf.train.Server`` objects.
 
+  DEPRECATED for TensorFlow 2.x+
+
   Args:
     :ctx: TFNodeContext containing the metadata specific to this node in the cluster.
     :num_gpu: number of GPUs desired
@@ -74,14 +80,18 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
   Returns:
     A tuple of (cluster_spec, server)
   """
-  import tensorflow as tf
+  import os
+  import time
   from . import gpu_info
+
+  if version.parse(TF_VERSION) >= version.parse("2.0.0"):
+    raise Exception("DEPRECATED: Use higher-level APIs like `tf.keras` or `tf.estimator`")
 
   logging.info("{0}: ======== {1}:{2} ========".format(ctx.worker_num, ctx.job_name, ctx.task_index))
   cluster_spec = ctx.cluster_spec
   logging.info("{0}: Cluster spec: {1}".format(ctx.worker_num, cluster_spec))
 
-  if tf.test.is_built_with_cuda() and num_gpus > 0:
+  if compat.is_gpu_available() and num_gpus > 0:
     # compute my index relative to other nodes placed on the same host (for GPU allocation)
     my_addr = cluster_spec[ctx.job_name][ctx.task_index]
     my_host = my_addr.split(':')[0]
@@ -96,7 +106,7 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
       try:
         # override PS jobs to only reserve one GPU
         if ctx.job_name == 'ps':
-          num_gpus = 1
+          num_gpus = 0
 
         # Find a free gpu(s) to use
         gpus_to_use = gpu_info.get_gpus(num_gpus, my_index)
@@ -105,6 +115,9 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
 
         # Set GPU device to use for TensorFlow
         os.environ['CUDA_VISIBLE_DEVICES'] = gpus_to_use
+
+        # Import tensorflow after gpu allocation
+        import tensorflow as tf
 
         # Create a cluster from the parameter server and worker hosts.
         cluster = tf.train.ClusterSpec(cluster_spec)
@@ -124,6 +137,8 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
       raise Exception("Failed to allocate GPU")
   else:
     # CPU
+    import tensorflow as tf
+
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     logging.info("{0}: Using CPU".format(ctx.worker_num))
 
@@ -156,6 +171,8 @@ def export_saved_model(sess, export_dir, tag_set, signatures):
 
   And this function will generate the `signature_def_map` and export the saved_model.
 
+  DEPRECATED for TensorFlow 2.x+.
+
   Args:
     :sess: a tf.Session instance
     :export_dir: path to save exported saved_model
@@ -166,6 +183,10 @@ def export_saved_model(sess, export_dir, tag_set, signatures):
     A saved_model exported to disk at ``export_dir``.
   """
   import tensorflow as tf
+
+  if version.parse(tf.__version__) >= version.parse("2.0.0"):
+    raise Exception("DEPRECATED: Use TF provided APIs instead.")
+
   g = sess.graph
   g._unsafe_unfinalize()           # https://github.com/tensorflow/serving/issues/363
   builder = tf.saved_model.builder.SavedModelBuilder(export_dir)
@@ -216,6 +237,9 @@ class DataFeed(object):
     self.done_feeding = False
     self.input_tensors = [tensor for col, tensor in sorted(input_mapping.items())] if input_mapping is not None else None
 
+    self.queue_in = mgr.get_queue(qname_in)
+    self.queue_out = mgr.get_queue(qname_out)
+
   def next_batch(self, batch_size):
     """Gets a batch of items from the input RDD.
 
@@ -234,34 +258,33 @@ class DataFeed(object):
     Returns:
       A batch of items or a dictionary of tensors.
     """
-    logging.debug("next_batch() invoked")
-    queue = self.mgr.get_queue(self.qname_in)
     tensors = [] if self.input_tensors is None else {tensor: [] for tensor in self.input_tensors}
     count = 0
+    queue_in = self.queue_in
+    no_input_tensors = self.input_tensors is None
     while count < batch_size:
-      item = queue.get(block=True)
+      item = queue_in.get(block=True)
       if item is None:
         # End of Feed
-        logging.info("next_batch() got None")
-        queue.task_done()
+        logger.info("next_batch() got None")
+        queue_in.task_done()
         self.done_feeding = True
         break
       elif type(item) is marker.EndPartition:
         # End of Partition
-        logging.info("next_batch() got EndPartition")
-        queue.task_done()
+        logger.info("next_batch() got EndPartition")
+        queue_in.task_done()
         if not self.train_mode and count > 0:
           break
       else:
         # Normal item
-        if self.input_tensors is None:
+        if no_input_tensors:
           tensors.append(item)
         else:
           for i in range(len(self.input_tensors)):
             tensors[self.input_tensors[i]].append(item[i])
         count += 1
-        queue.task_done()
-    logging.debug("next_batch() returning {0} items".format(count))
+        queue_in.task_done()
     return tensors
 
   def should_stop(self):
@@ -277,11 +300,9 @@ class DataFeed(object):
     Args:
       :results: array of output data for the equivalent batch of input data.
     """
-    logging.debug("batch_results() invoked")
-    queue = self.mgr.get_queue(self.qname_out)
+    queue = self.queue_out
     for item in results:
       queue.put(item, block=True)
-    logging.debug("batch_results() returning data")
 
   def terminate(self):
     """Terminate data feeding early.
@@ -291,7 +312,7 @@ class DataFeed(object):
     to terminate an RDD operation early, so the extra partitions will still be sent to the executors (but will be ignored).  Because
     of this, you should size your input data accordingly to avoid excessive overhead.
     """
-    logging.info("terminate() invoked")
+    logger.info("terminate() invoked")
     self.mgr.set('state', 'terminating')
 
     # drop remaining items in the queue
@@ -304,5 +325,5 @@ class DataFeed(object):
         queue.task_done()
         count += 1
       except Empty:
-        logging.info("dropped {0} items from queue".format(count))
+        logger.info("dropped {0} items from queue".format(count))
         done = True
